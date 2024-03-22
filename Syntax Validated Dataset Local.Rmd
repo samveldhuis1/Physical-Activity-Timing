@@ -10,7 +10,12 @@ html_document:
   toc_floot: true
 ---
 
-### Libraries 
+### Libraries and Settings
+
+```{r, setup, include = FALSE}
+knitr::opts_knit$set(root.dir = "directory")
+knitr::opts_chunk$set(echo=TRUE, eval=FALSE)
+```
 
 ```{r}
 library(vctrs)
@@ -36,17 +41,16 @@ library(cowplot)
 library(readxl)
 ```
 
-
 ### Loading and Cleaning the Data
 
 Combine all cvs files into one dataframe. Create dataframe that contains all filenames and filepaths in the directory. Then create function that reads all the csv's. rowwise() is used such that each file represents data for a different person and you want to process each file individually. Use the do() function from dplyr that allows any R function to run on each group or row in the dataframe. 
 
 
 ```{r}
-raw_files <- data_frame(filename = list.files("C:/Users/sveldhu6/Documents/ActiGraph/ActiLife/CSVFiles/"))
+raw_files <- data_frame(filename = list.files("path"))
 
 raw_file_paths <- raw_files %>%
-  mutate(filepath = paste0("C:/Users/sveldhu6/Documents/ActiGraph/ActiLife/CSVFiles/", filename))
+  mutate(filepath = paste0("path", filename))
 ```
 
 
@@ -429,7 +433,7 @@ ggsave(filename = "PA_graph.png", plot = PA_graph, width = 7, height = 5)
 
 
 ```{r}
-patient_data <-  read_sav("\\\\ds\\DATA\\JC\\Datamanagement\\Research\\Cancer\\PERFECT_Sam\\E_ResearchData\\2_ResearchData\\ii. PERFECT\\PERFECT_T0_T2\\PERFECTdataCompleteT0_T2.sav")
+patient_data <-  read_sav("path")
 
 patient_data <- patient_data %>%
   rename(ID = Trialnr) %>%
@@ -990,7 +994,7 @@ change_column_names <- function(df, new_names) {
 
 ```{r}
 # prepare forest data  
-Results_Table <- read_excel("//ds/DATA/JC/Datamanagement/Research/Cancer/PERFECT_Sam/G_Output/2_Data/Results Table.xlsx", sheet = "Blad2")
+Results_Table <- read_excel("path")
 
 Results_Table <- Results_Table %>% 
   mutate_if(is.numeric, round, 2) %>%
