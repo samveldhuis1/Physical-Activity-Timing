@@ -78,20 +78,17 @@ Clean data by removing the filepath such that every individual has the format of
 
 ```{r}
 starting_times <- starting_times %>%
-  rename(PatientID_Time = filepath)
-
-starting_times <- starting_times %>%
-  mutate(Extracted = basename(file_path_sans_ext(PatientID_Time)))
-
-starting_times <- separate(starting_times, Extracted, into = c("ID", "Date"), sep = " ")
-
-starting_times$Date[164] = as.character("(2017-11-14)60sec")
-
-starting_times$Date <- str_extract(starting_times$Date, "\\d{4}-\\d{2}-\\d{2}")
-
-starting_times$Unique_ID <- paste(starting_times$ID, starting_times$Date, sep = "_")
-
-starting_times <- starting_times %>%
+  rename(PatientID_Time = filepath) %>%
+  mutate(
+    Extracted = basename(file_path_sans_ext(PatientID_Time)),
+    Date = case_when(
+      row_number() == 164 ~ "(2017-11-14)60sec",
+      TRUE ~ Extracted
+    ),
+    Date = str_extract(Date, "\\d{4}-\\d{2}-\\d{2}")
+  ) %>%
+  separate(Extracted, into = c("ID", "Date"), sep = " ", extra = "merge") %>%
+  mutate(Unique_ID = paste(ID, Date, sep = "_")) %>%
   relocate(Unique_ID, .before = `Start Time 01:00:00`) %>%
   select(-ID, -Date, -PatientID_Time)
 ```
@@ -115,9 +112,8 @@ Combine all columns into one for starting_times with the unite() function.
 
 ```{r}
 starting_times <- starting_times %>%
-  unite(Start, `Start Time 01:00:00`:`Start Time 15:57:00`, sep = " ")
-
-starting_times$Start <- str_extract(starting_times$Start, "\\d{2}:\\d{2}:\\d{2}")
+  unite(Start, `Start Time 01:00:00`:`Start Time 15:57:00`, sep = " ", na.rm = TRUE) %>%
+  mutate(Start = str_extract(Start, "\\d{2}:\\d{2}:\\d{2}"))
 ```
 
 
@@ -137,11 +133,12 @@ Create variable Date_Time for future timestamps.
 
 
 ```{r}
-starting_times$Date_Time <- paste(starting_times$Unique_ID, starting_times$Start, sep = " ")
-
-starting_times$Date_Time <- str_extract(starting_times$Date_Time, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")
-
-starting_times$Date_Time <- trimws(starting_times$Date_Time)
+starting_times <- starting_times %>%
+  mutate(
+    Date_Time = paste(Unique_ID, Start, sep = " "),
+    Date_Time = str_extract(Date_Time, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"),
+    Date_Time = trimws(Date_Time)
+  )
 ```
 
 
@@ -165,18 +162,15 @@ Organize and clean raw_data dataframe by extracting patient ID and starting date
 
 ```{r}
 raw_data <- raw_data %>%
-  mutate(Extracted = file_path_sans_ext(filepath))
-
-raw_data <- separate(raw_data, Extracted, into = c("ID", "Date"), sep = " ")
-
-raw_data$ID <- str_sub(raw_data$ID, -3, -1)
-
-raw_data$Date <- str_extract(raw_data$Date, "\\d{4}-\\d{2}-\\d{2}")
-
-raw_data <- raw_data %>%
+  mutate(
+    Extracted = file_path_sans_ext(filepath),
+    ID = str_sub(Extracted, -3, -1),
+    Date = str_extract(Extracted, "\\d{4}-\\d{2}-\\d{2}")
+  ) %>%
+  separate(Extracted, into = c("Dummy_ID", "Dummy_Date"), sep = " ") %>%
   mutate(Unique_ID = paste(ID, Date, sep = "_")) %>%
   relocate(Unique_ID, .before = Axis1) %>%
-  select(-Date, -filepath)
+  select(-c(Dummy_ID, Dummy_Date, Date, filepath))
 ```
 
 
@@ -198,25 +192,25 @@ Create variable that gives the date and start time in ymd_hms format. This way a
 
 
 ```{r}
-raw_data$Date_Time <- paste(raw_data$Unique_ID, raw_data$Start, sep = " ")
-
 raw_data <- raw_data %>%
-  relocate(Date_Time, .before = Epoch_Number)
+  # Create Date_Time by concatenating Unique_ID and Start
+  mutate(Date_Time = paste(Unique_ID, Start, sep = " "),
+         # Extract the datetime pattern
+         Date_Time = str_extract(Date_Time, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"),
+         # Convert to actual datetime format
+         Date_Time_Formatted = ymd_hms(Date_Time)) %>%
 
-raw_data$Date_Time <- str_extract(raw_data$Date_Time, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")
-
-raw_data <- raw_data %>%
-  mutate(Date_Time_Formatted = ymd_hms(Date_Time))
-
-raw_data <- raw_data %>%
+  # Calculate Time_Stamp for each epoch
   group_by(Unique_ID) %>%
-  mutate(Time_Stamp = Date_Time_Formatted + seconds((Epoch_Number - 1) * 60))
+  mutate(Time_Stamp = Date_Time_Formatted + seconds((row_number() - 1) * 60)) %>%
+  ungroup() %>%
 
-raw_data$Hour <- format(raw_data$Time_Stamp , format = "%H")
-
-raw_data <- raw_data %>%
-  mutate(Days = weekdays(Time_Stamp)) %>%
+  # Extract Hour and Days, and remove unneeded columns
+  mutate(Hour = format(Time_Stamp, format = "%H"),
+         Days = weekdays(Time_Stamp)) %>%
   select(-Date_Time, -Date_Time_Formatted) %>%
+
+  # Relocate columns as specified
   relocate(Days, Hour, Time_Stamp, .before = Axis1)
 ```
 
@@ -833,50 +827,6 @@ results_function(model = model_FA)
 summary(model_VO2);confint(model_VO2)
 ```
 
-
-```{r}
-# # add predicted values to dataframe to visually inspect change
-# # quality of life
-# long_data$row_number <- 1:nrow((long_data))
-# 
-# model_data_QLQ_int <- model.frame(model_QLQ)
-# model_data_QLQ_int$row_number <- as.integer(row.names(model_data_QLQ_int))
-# model_data_QLQ_int$predicted_QLQ <- predict(model_QLQ, re.form = ~ 0)
-# 
-# long_data <- left_join(long_data, model_data_QLQ_int[c("row_number", "predicted_QLQ")], by = "row_number")
-# 
-# # fatigue
-# model_data_FA_int <- model.frame(model_FA)
-# model_data_FA_int$row_number <- as.integer(row.names(model_data_FA_int))
-# model_data_FA_int$predicted_FA <- predict(model_FA, re.form = ~ 0)
-# 
-# long_data <- left_join(long_data, model_data_FA_int[c("row_number", "predicted_FA")], by = "row_number")
-# 
-# # VO2
-# model_data_VO2_int$ID <- 101:(nrow(model_data_VO2_int) + 100)
-# model_data_VO2_int$ID <- as.factor(model_data_VO2_int$ID)
-# model_data_VO2_int$predicted_VO2 <- predict(model_VO2)
-# 
-# long_data <- left_join(long_data, model_data_VO2_int[c("ID", "predicted_VO2")], by = "ID")
-```
-
-
-Visualize the mean response among morning and afternoon patients in the control and intervention groups over time.
-
-
-```{r}
-# # quality of life
-# ggplot(long_data, aes(x = timepoint, y = QLQ_summary_score)) +
-#   geom_line(aes(group = ID), color = "#7F8487", size = 0.6, alpha = 0.6) +
-#   geom_point(aes(y = predicted_QLQ, col = Training_Group.y)) +
-#   geom_smooth(method = "loess", aes(y = predicted_QLQ, group = Training_Group.y), se = FALSE) +
-#   scale_x_discrete(breaks = c("12 Weeks", "24 Weeks")) +
-#   theme(axis.title.x = element_blank()) +
-#   scale_color_npg() +
-#   theme_bw()
-```
-
-
 Check Assumptions and Correlations
 
 
@@ -1213,37 +1163,4 @@ forestplot_VO2_12 <- forest(
 
 forestplot_VO2_12
 ggsave(filename = "forestVO2.png", plot = forestplot_VO2_12, width = 6.5, height = 4)
-```
-
-
-### K-means for Longitudinal Data (kml)
-
-  
-```{r, echo=TRUE, include=TRUE}
-set.seed(123)
-Scaled_Relative_Acceleration <- Relative_Acceleration %>% 
-  select(ID, Hour, VM3.x, RA) %>% 
-  mutate(Hour = as.numeric(Hour))
-
-# Aggregate only VM3.x by ID and Hour
-Scaled_Relative_Acceleration <- aggregate(cbind(VM3.x, RA) ~ ID + Hour, data = Scaled_Relative_Acceleration, FUN = mean)
-
-# Scale only VM3.x (not Hour)
-Scaled_Relative_Acceleration <- scale(Scaled_Relative_Acceleration[c("VM3.x", "RA")])
-
-# Perform hierarchical k-means clustering on the scaled VM3.x along with Hour
-hkmeans_results <- hkmeans(Scaled_Relative_Acceleration, k = 2)
-
-# Use fviz_cluster to visualize the clusters
-fviz_cluster(
-  hkmeans_results, 
-  data = Scaled_Relative_Acceleration,
-  palette = c("#2E9FDF", "#E7B800"), 
-  geom = "point",
-  ellipse.type = "convex", 
-  ggtheme = theme_bw()
-)
-
-Scaled_Relative_Acceleration <- as.data.frame(Scaled_Relative_Acceleration)
-Scaled_Relative_Acceleration$Clusters <- hkmeans_results$cluster
 ```
