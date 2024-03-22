@@ -1,0 +1,1249 @@
+---
+title: Impact of physical activity timing on health outcomes in esophageal cancer
+  patients.
+author: "Sam Veldhuis"
+date: ""
+output: 
+html_document:
+  theme: journal
+  toc: true
+  toc_floot: true
+---
+
+### Libraries and Settings
+
+Set working directory.
+
+```{r, setup, include = FALSE}
+knitr::opts_knit$set(root.dir = "/dsD/ATA/JC/Datamanagement/Research/Cancer/PERFECT_Sam/E_ResearchData/2_ResearchData/iii. CSV Files Physical Activity Data/CSVFiles")
+knitr::opts_chunk$set(echo=TRUE, eval=FALSE)
+```
+
+
+```{r}
+library(vctrs)
+library(tidyverse)
+library(ggthemes)
+library(rmarkdown)
+library(data.table)
+library(accelerometry)
+library(zoo)
+library(stats)
+library(lme4)
+library(tools)
+library(factoextra)
+library(summarytools)
+library(naniar)
+library(car)
+library(haven)
+library(jtools)
+library(emmeans)
+library(ggsci)
+library(forestploter)
+library(cowplot)
+library(readxl)
+```
+
+
+### Loading and Cleaning the Data
+
+Combine all cvs files into one dataframe. Create dataframe that contains all filenames and filepaths in the directory. Then create function that reads all the csv's. rowwise() is used such that each file represents data for a different person and you want to process each file individually. Use the do() function from dplyr that allows any R function to run on each group or row in the dataframe. 
+
+
+```{r}
+raw_files <- data_frame(filename = list.files("C:/Users/sveldhu6/Documents/ActiGraph/ActiLife/CSVFiles/"))
+
+raw_file_paths <- raw_files %>%
+  mutate(filepath = paste0("C:/Users/sveldhu6/Documents/ActiGraph/ActiLife/CSVFiles/", filename))
+```
+
+
+Create separate dataframe to extract all starting times for each participant. 
+
+
+```{r}
+read_csv_starting_times <- function(filepath) {
+  read_csv(filepath, skip = 2, n_max = 1) %>%
+    mutate(filepath = filepath)
+}
+
+starting_times <- raw_file_paths %>%
+  rowwise() %>%
+  do(read_csv_starting_times(.$filepath))
+```
+
+
+Clean data by removing the filepath such that every individual has the format of 101 (date). Next step renaming the column. Do the same steps for the raw_data dataframe.
+
+
+```{r}
+starting_times <- starting_times %>%
+  rename(PatientID_Time = filepath)
+
+starting_times <- starting_times %>%
+  mutate(Extracted = basename(file_path_sans_ext(PatientID_Time)))
+
+starting_times <- separate(starting_times, Extracted, into = c("ID", "Date"), sep = " ")
+
+starting_times$Date[164] = as.character("(2017-11-14)60sec")
+
+starting_times$Date <- str_extract(starting_times$Date, "\\d{4}-\\d{2}-\\d{2}")
+
+starting_times$Unique_ID <- paste(starting_times$ID, starting_times$Date, sep = "_")
+
+starting_times <- starting_times %>%
+  relocate(Unique_ID, .before = `Start Time 01:00:00`) %>%
+  select(-ID, -Date, -PatientID_Time)
+```
+
+
+```{r}
+for (i in 2:length(starting_times)) {
+  starting_times_column_names <- names(starting_times[i])
+  
+  starting_times[[starting_times_column_names]] <- str_replace_all(
+    starting_times[[starting_times_column_names]],
+    "Start Date \\d{1,2}/\\d{1,2}/\\d{4}",
+    names(starting_times[i])
+  )
+} 
+```
+
+
+Combine all columns into one for starting_times with the unite() function.
+
+
+```{r}
+starting_times <- starting_times %>%
+  unite(Start, `Start Time 01:00:00`:`Start Time 15:57:00`, sep = " ")
+
+starting_times$Start <- str_extract(starting_times$Start, "\\d{2}:\\d{2}:\\d{2}")
+```
+
+
+Patients often have multiple measurements, and the starting date plays a pivotal role in distinguishing them. Given that not all dates and IDs are unique. Rename the IDs to provide clarity regarding which measurement corresponds to which starting time. Employ the substring() function in R,  to create a new column that indicates the position of each measurement within the sequence.
+
+
+```{r}
+starting_times <- starting_times %>%
+  group_by(substring(Unique_ID, 1, 3)) %>%
+  mutate(measurement_number = row_number()) %>%
+  ungroup() %>%
+  select(-`substring(Unique_ID, 1, 3)`)
+```
+
+
+Create variable Date_Time for future timestamps. 
+
+
+```{r}
+starting_times$Date_Time <- paste(starting_times$Unique_ID, starting_times$Start, sep = " ")
+
+starting_times$Date_Time <- str_extract(starting_times$Date_Time, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")
+
+starting_times$Date_Time <- trimws(starting_times$Date_Time)
+```
+
+
+Create a raw_data dataframe that contains all physical activity counts of each individual.
+
+
+```{r}
+read_csv_and_filename <- function(filepath) {
+  read_csv(filepath, skip = 10) %>%
+    mutate(filepath = filepath)
+}
+
+raw_data <- raw_file_paths %>%
+  rowwise() %>%
+  do(read_csv_and_filename(.$filepath))
+```
+
+
+Organize and clean raw_data dataframe by extracting patient ID and starting dates.
+
+
+```{r}
+raw_data <- raw_data %>%
+  mutate(Extracted = file_path_sans_ext(filepath))
+
+raw_data <- separate(raw_data, Extracted, into = c("ID", "Date"), sep = " ")
+
+raw_data$ID <- str_sub(raw_data$ID, -3, -1)
+
+raw_data$Date <- str_extract(raw_data$Date, "\\d{4}-\\d{2}-\\d{2}")
+
+raw_data <- raw_data %>%
+  mutate(Unique_ID = paste(ID, Date, sep = "_")) %>%
+  relocate(Unique_ID, .before = Axis1) %>%
+  select(-Date, -filepath)
+```
+
+
+Use merge() to join starting_times with raw_data such that the measurement numbers and the starting times are added. Number the rows for each patient, such that epochs in each patient are displayed in a sequence for every measuring week.
+
+
+```{r}
+raw_data <- merge(raw_data, starting_times, by = "Unique_ID") 
+
+raw_data <- raw_data %>%
+  group_by(Unique_ID) %>%
+  mutate(Epoch_Number = row_number()) %>%
+  ungroup() %>%
+  relocate(measurement_number, Start, Date_Time, Epoch_Number, .before = Axis1)
+```
+
+
+Create variable that gives the date and start time in ymd_hms format. This way a variable Time_Stamp can be created and it can later be used for the accelerometry package to validate weartime. Another variable Hour is created. In combination with Time_Stamp they indicate at which times and dates the counts of physical activity took place. Finally, create variables Hour and Days. 
+
+
+```{r}
+raw_data$Date_Time <- paste(raw_data$Unique_ID, raw_data$Start, sep = " ")
+
+raw_data <- raw_data %>%
+  relocate(Date_Time, .before = Epoch_Number)
+
+raw_data$Date_Time <- str_extract(raw_data$Date_Time, "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}")
+
+raw_data <- raw_data %>%
+  mutate(Date_Time_Formatted = ymd_hms(Date_Time))
+
+raw_data <- raw_data %>%
+  group_by(Unique_ID) %>%
+  mutate(Time_Stamp = Date_Time_Formatted + seconds((Epoch_Number - 1) * 60))
+
+raw_data$Hour <- format(raw_data$Time_Stamp , format = "%H")
+
+raw_data <- raw_data %>%
+  mutate(Days = weekdays(Time_Stamp)) %>%
+  select(-Date_Time, -Date_Time_Formatted) %>%
+  relocate(Days, Hour, Time_Stamp, .before = Axis1)
+```
+
+
+### Data Manipulation
+
+Create a variable that calculates the vector magnitude, such that the three axes are transformed to one omnidirectional variable. The vector magnitude can be used to calculate the metabolic equivalent of task (METs), which then can be used to identify patterns of intensity of physical activity. The vector magnitude is the summed value from the vector sqrt(X^2 + Y^2 + Z^2).
+
+3 METs = 3208 counts moderate activity
+6 METs = 8565 counts vigorous activity
+9 METs = 11593 counts
+
+Or Freedson et al. cut-off points with : 
+
+Larger than 1,950 counts per minute defined as MVPA. 
+
+
+```{r}
+raw_data <- raw_data %>%
+  mutate(VM3 = sqrt(Axis1^2 + Axis2^2 + Axis3^2))
+```
+
+
+The next step is to validate the data by classifying the wear time and non-wear time using the accelerometry package. The package contains the function weartime() that can do this. The following criteria were implemented in the function: 1) zero-count threshold during a non-wear time interval, 2) 30-min time window for consecutive zero/nonzero counts.
+
+
+```{r}
+validated_data <- raw_data
+counts <- validated_data$VM3
+validated_data$weartime <- weartime(
+  counts = counts, 
+  window = 30, 
+  tol = 0, 
+  tol_upper = 0, 
+  nci = FALSE, 
+  days_distinct = FALSE, 
+  units_day = 1440
+)
+```
+
+
+Create a subset of the data called validated_data to extract the the weartime measurements noted as 1.
+
+
+```{r}
+validated_data <- subset(
+  validated_data, 
+  weartime == 1, 
+  select = c(1:18)
+)
+```
+
+
+Create a New Day_Part Column: Establishing Patterns of Heightened Physical Activity
+
+Introduce a new column dedicated to categorizing these patterns by different parts of the day. This enables assigning patients to their respective activity groups, forming the foundation for our independent variable. 
+
+Subsequently, patients will be classified based on their timing of physical activity into the following categories:
+
+Morning (6:00 AM - 12:00 PM)
+Midday (12:00 PM - 6:00 PM)
+Evening (6:00 PM - 11:00 PM)
+
+This categorization method adheres to the criteria established by J. van der Velde et al.
+
+
+```{r}
+validated_data$Hour <- as.numeric(validated_data$Hour)
+
+validated_data$Day_Part <- ifelse(
+    validated_data$Hour >= 7 & validated_data$Hour < 13, "morning",
+    ifelse(validated_data$Hour >= 13 & validated_data$Hour <= 23, "afternoon", "midnight")
+  )
+
+validated_data$Day_Part <- as.factor(validated_data$Day_Part)
+
+validated_data <- validated_data %>%
+  dplyr::filter(Day_Part != "midnight") %>%
+  relocate(Days, Day_Part, .before = Axis1)
+```
+
+
+Filter based on wearing criteria from Migueles J. et al. where the total wearing hours per day should be larger than 10.  
+
+
+```{r}
+validated_data$Time_Stamp <- as.character(validated_data$Time_Stamp)
+
+validated_data <- validated_data %>%
+  mutate(Date = str_extract(Time_Stamp, "\\d{4}-\\d{2}-\\d{2}")) %>%
+  relocate(Date, .before = Hour)
+
+summarized_days <- validated_data %>%
+  group_by(Unique_ID, Date) %>%
+  summarize(Total_Hours = n_distinct(Hour)) %>% 
+  dplyr::filter(Total_Hours >= 10)
+```
+
+
+Create vector days_validated that explores the differences between summarized_days and validated_hours, such that R recognizes which days contain more than 10 hours and which do not. This way R filters out the days < 10 hours in the validated_hours dataframe.
+
+
+```{r}
+days_validated <- validated_data %>% 
+  semi_join(summarized_days, by = c("Unique_ID", "Date"))
+```
+
+
+Filter for patients who had less than 4 valid wearing days. This is to make sure patients have enough reliable data for the analysis based on the recommendations of Migueles J. et al.  
+
+
+```{r}
+weartime <- days_validated %>%
+  group_by(Unique_ID) %>%
+  dplyr::filter(n_distinct(Days) >= 4) %>%
+  ungroup() %>% 
+  mutate(ID = str_extract(Unique_ID, "\\d{3}")) %>% 
+  relocate(ID, .before = measurement_number)
+```
+
+
+Aggregate the weartime data to establish the mean vector magnitude per hour, per date, per ID. Calculate relative acceleration by dividing the hourly mean with the total mean. 
+
+
+```{r}
+Counts_Aggregated <- weartime %>% 
+  group_by(Unique_ID, ID, measurement_number, Date, Hour) %>% 
+  summarize(VM3 = mean(VM3)) %>% 
+  ungroup() 
+
+Daily_Means <- Counts_Aggregated %>% 
+  group_by(Unique_ID, Date) %>% 
+  summarize(VM3 = mean(VM3, trim = 0.2))
+
+Relative_Acceleration <- Counts_Aggregated %>% 
+  inner_join(Daily_Means, by = c("Unique_ID", "Date")) %>% 
+  mutate(RA = VM3.x / VM3.y)
+```
+
+
+Calculate Relative_Acceleration by summarizing the mean relative acceleration. Make groups to indicate at which day part the patients are the most active. 
+
+
+```{r}
+Relative_Acceleration <- Relative_Acceleration %>%
+  group_by(Unique_ID, Date) %>%
+  mutate(Training_Group = case_when(
+    Hour >= 7 & Hour <= 13 & RA == max(RA) ~ 1,
+    Hour > 13 & RA == max(RA) ~ 2)
+  ) %>% 
+  ungroup()
+
+Relative_Acceleration$Training_Group <- factor(
+  Relative_Acceleration$Training_Group, 
+  levels = c(1, 2),
+  labels = c("Morning", "Afternoon")
+)
+
+Relative_Acceleration <- Relative_Acceleration %>%
+  group_by(Unique_ID, Date) %>%
+  mutate(Training_Group = first(na.omit(Training_Group))) %>%
+  ungroup()
+
+Training_Frequency <- Relative_Acceleration %>%
+  group_by(ID, Training_Group) %>%
+  summarize(max_count = n()) %>% 
+  mutate(Indicator = ifelse(max_count == max(max_count), 1, 0)) %>% 
+  filter(Indicator == 1) 
+
+Relative_Acceleration <- merge(
+  Relative_Acceleration, 
+  Training_Frequency[, c("ID", "Training_Group")], 
+  by = "ID", all.x = TRUE
+) 
+```
+
+
+### Visualize
+
+
+```{r, echo=TRUE, include=TRUE}
+Common_Color_Scale <- scale_color_manual(values = c("Morning" = "#186F65", "Afternoon" = "#B2533E"))
+
+Common_Plot <- function(data, aes_x, aes_y, aes_group = NULL, x_lab = NULL, y_lab = NULL) {
+  ggplot(data, aes(x = {{ aes_x }}, y = {{ aes_y }}, group = {{ aes_group }}, color = Training_Group.y)) +
+    xlab(x_lab) +
+    ylab(y_lab) +
+    guides(color = guide_legend(title = "Chronoactivity")) +
+    theme_bw() +
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+}
+
+ggplot(Relative_Acceleration, aes(x = Hour, y = RA)) +
+  stat_smooth(method = "gam", size = 0.7, color = "#607274", alpha = 0.3) +
+  scale_x_continuous(breaks = c(7:23)) +
+  ylab("Relative Acceleration") +
+  theme_classic()
+  
+
+Common_Plot(Relative_Acceleration, 
+            aes_x = Hour, 
+            aes_y = RA, 
+            y_lab = "Relative Acceleration") +
+  geom_point(aes(color = Training_Group.y), size = 0.8, alpha = 0.4) + 
+  facet_wrap(~ Training_Group.y) +
+  ggtitle("Scatterplot Relative Acceleration")
+
+PA_graph <- Common_Plot(Relative_Acceleration, 
+            aes_x = Hour, 
+            aes_y = RA, 
+            aes_group = Unique_ID,
+            x_lab = "Hour", 
+            y_lab = "Relative acceleration") +
+  scale_x_continuous(breaks = c(7:23)) +
+  stat_smooth(aes(group = Training_Group.y), method = "gam", size = 0.7, alpha = 0.3) +
+  ggtitle("Physical activity patterns") +
+  Common_Color_Scale
+
+ggsave(filename = "PA_graph.png", plot = PA_graph, width = 7, height = 5)
+```
+
+
+### Patient Data
+
+
+```{r}
+patient_data <-  read_sav("\\\\ds\\DATA\\JC\\Datamanagement\\Research\\Cancer\\PERFECT_Sam\\E_ResearchData\\2_ResearchData\\ii. PERFECT\\PERFECT_T0_T2\\PERFECTdataCompleteT0_T2.sav")
+
+patient_data <- patient_data %>%
+  rename(ID = Trialnr) %>%
+  mutate(
+    ID = as.character(ID),
+    Center = as.factor(Center)
+  ) 
+```
+
+
+First make a dataframe that contains only the information about the group per ID and join this with patient_data. Since a few ID's were removed due to wearing criteria, the same ID's should be removed from the patient data. These are ID's 129, 137 and 402. First check if these patients have large deviations in characteristics from the other patients. 
+
+
+```{r}
+# check if removed patients differ
+Removed_Patients <- patient_data %>% 
+  slice(c(29, 36, 87)) %>% 
+  select(
+    
+    ID, Randomization, Sex, Age, Weight_T0, Weight_T1, 
+    BMI_T0, Height_T1, ALG2_werk, Tumorstadium, Tumor_type, Time_since_surgery,
+    Time_since_surgery_dich, PSQI_bedin_tijd, PSQI_beduit_tijd, PSQI_urenslaap,  
+    PSQI_bedin_tijd_T1, PSQI_beduit_tijd_T1, PSQI_urenslaap_T1,
+    Comorb_baseline_1, Comorb_baseline_2, QLQ_summary_score_T0, 
+    QLQ_summary_score_T1, QLQ_summary_score_T2, VO2peak_T0_avrg, VO2peak_T1_avrg,
+    Totaal_Score, Totaal_Score_T1, Totaal_Score_T2
+    
+  )
+```
+
+
+```{r}
+# remove patients who did not meet the valid wearing time criteria
+Group_Data <- Relative_Acceleration %>%
+  group_by(ID) %>%
+  summarize(
+    VM3.x = mean(VM3.x),
+    Training_Group.y = first(Training_Group.y),
+    .groups = "keep"
+  ) %>%
+  select(ID, Training_Group.y, VM3.x)
+
+Non_Matching_IDs <- patient_data$ID[!patient_data$ID %in% Group_Data$ID]
+
+patient_data <- subset(patient_data, ID %in% Group_Data$ID)
+
+patient_data <- patient_data %>%
+  left_join(Group_Data, by = "ID")
+```
+
+
+The calculation of METs is now possible due to the availability of patient data. The formula was:
+
+Extract the data about bodymass and gender per ID and create a new METs_Data to join to Relative_Acceleration.
+
+
+```{r}
+METs_Data <- subset(
+  patient_data, 
+  select = c(
+    
+  ID, Randomization, Sex, Age, Center, Weight_T0, 
+  Weight_T1, BMI_T0, Height_T1, ALG2_werk, 
+  Tumorstadium,Tumor_type, Time_since_surgery,
+  Time_since_surgery_dich, Comorb_baseline_1, 
+  Comorb_baseline_2, QLQ_summary_score_T0, 
+  QLQ_summary_score_T1, QLQ_summary_score_T2,
+  VO2peak_kg_T0_abs, VO2peak_kg_T1_abs, 
+  Totaal_Score, Totaal_Score_T1, Totaal_Score_T2
+  
+  )
+)
+```
+
+
+Join the relevant variables from patient_data with Relative_Acceleration. Match the randomization numbers, such that all the data are in long format and are indexed accordingly. First transform METs_Data to long format.
+
+
+```{r}
+long_data <- METs_Data %>% 
+  rename(
+    Comorb_baseline_T0 = Comorb_baseline_1,
+    Comorb_baseline_T1 = Comorb_baseline_2,
+    VO2_peak_T0 = VO2peak_kg_T0_abs,
+    VO2_peak_T1 = VO2peak_kg_T1_abs,
+    Totaal_Score_T0 = Totaal_Score
+    ) %>% 
+  pivot_longer(
+    cols = c(
+    Weight_T0, Weight_T1, BMI_T0, Height_T1, Comorb_baseline_T0,
+    Comorb_baseline_T1, QLQ_summary_score_T0, QLQ_summary_score_T1, QLQ_summary_score_T2,
+    VO2_peak_T0, VO2_peak_T1, Totaal_Score_T0, Totaal_Score_T1, Totaal_Score_T2
+      ),
+    names_to = c(".value", "timepoint"),
+    names_pattern = "^(.+)_(T[0-2])$"
+  )
+
+long_data <- long_data %>% 
+  left_join(Group_Data, by = "ID") %>% 
+  mutate(METs = 2.7406 + 0.00056 * VM3.x - 0.008542 * Age - 0.01380 * Weight)
+
+Relative_Acceleration <- long_data %>%
+  select(ID, Randomization) %>%
+  right_join(Relative_Acceleration, by = "ID")
+```
+
+
+```{r, echo=TRUE, include=TRUE}
+# transform model variables to factors and add baseline values as covariate
+long_data <- long_data %>%
+  mutate(
+    
+    timepoint = factor(
+      timepoint,
+      levels = c("T0", "T1", "T2"),
+      labels = c("Baseline", "12 Weeks", "24 Weeks")
+    ),
+    Randomization = factor(
+      Randomization, 
+      levels = c(1, 2), 
+      labels = c("Intervention", "Control")
+    ),
+    Center = factor(
+      Center, 
+      levels = c(1, 2, 3, 4, 5, 6, 7, 8, 9), 
+      labels = c("UMCU", "Almelo", "Eindhoven", "Antonius", "VU", "IJsselland","Radboud", "Erasmus", "AMC")
+    ),
+    ID = as.factor(ID),
+    Sex = factor(
+      Sex, 
+      levels = c(1, 2), 
+      labels = c("Male", "Female")
+    ),
+    Time_since_surgery_dich = factor(
+      Time_since_surgery_dich, 
+      levels = c(0, 1), 
+      labels = c("0-5", "6-12")
+    )
+    
+  )
+
+# add baseline values 
+long_data <- long_data %>% 
+  group_by(ID) %>% 
+  mutate(
+    Basevalue_QLQ = first(QLQ_summary_score),
+    Basevalue_FA = first(Totaal_Score),
+    Basevalue_VO2 = first(VO2_peak)
+  ) 
+```
+
+
+### Table 1
+
+
+```{r, echo=TRUE, include=TRUE}
+table1_patient_data <- patient_data %>%
+  select(
+    Randomization, Training_Group.y, Sex, Age, Weight_T0, BMI_T0, Education_cat, ALG2_werk, Tumor_type, 
+    Tumorstadium, Time_since_surgery, Time_since_surgery_dich, Comorb_baseline_1
+    ) %>%
+  mutate(Randomization = as.factor(Randomization))
+
+# grouped by randomization and training group
+summary_group1_intervention <- table1_patient_data[
+  table1_patient_data$Training_Group.y == "Morning" & table1_patient_data$Randomization == 1, 
+]
+
+summary_group1_control <- table1_patient_data[
+  table1_patient_data$Training_Group.y == "Morning" & table1_patient_data$Randomization == 2, 
+]
+
+summary_group2_intervention <- table1_patient_data[
+  table1_patient_data$Training_Group.y == "Afternoon" & table1_patient_data$Randomization == 1, 
+]
+
+summary_group2_control <- table1_patient_data[
+  table1_patient_data$Training_Group.y == "Afternoon" & table1_patient_data$Randomization == 2, 
+]
+
+
+dfsummary_group1_intervention <- dfSummary(summary_group1_intervention)
+dfsummary_group1_control <- dfSummary(summary_group1_control)
+dfsummary_group2_intervention <- dfSummary(summary_group2_intervention)
+dfsummary_group2_control <- dfSummary(summary_group2_control)
+dfsummary_all <- dfSummary(table1_patient_data)
+
+function_mean_sd <- function(data) {
+    mean_value <- mean(data, na.rm = TRUE)
+    sd_value <- sd(data, na.rm = TRUE)
+    return(list(mean = mean_value, sd = sd_value))
+  }
+
+function_mean_sd(data = long_data$METs)
+function_mean_sd(data = long_data$METs[long_data$Randomization == "Control" & long_data$Training_Group.y == "Morning"])
+function_mean_sd(data = long_data$METs[long_data$Randomization == "Intervention" & long_data$Training_Group.y == "Morning"])
+function_mean_sd(data = long_data$METs[long_data$Randomization == "Control" & long_data$Training_Group.y == "Afternoon"])
+function_mean_sd(data = long_data$METs[long_data$Randomization == "Intervention" & long_data$Training_Group.y == "Afternoon"])
+```
+
+
+### Descriptives
+
+
+```{r, echo=TRUE, include=TRUE}
+long_data %>% 
+  Common_Plot(
+    aes_x = timepoint, 
+    aes_y = QLQ_summary_score, 
+    aes_group = ID, 
+    y_lab = "QLQ Summary Score") +
+  geom_line(size = 0.6, color = "#7F8487") +
+  geom_smooth(method = "loess", se = FALSE, aes(group = Training_Group.y), size = 1.2) +
+  geom_point(size = 1, shape = 21, fill = "white") + 
+  scale_color_npg()
+
+long_data %>% 
+  Common_Plot(
+    aes_x = timepoint, 
+    aes_y = Totaal_Score, 
+    aes_group = ID, 
+    y_lab = "Fatigue Score") +
+  geom_line(size = 0.6, color = "#7F8487") +
+  geom_smooth(method = "loess", se = FALSE, aes(group = Training_Group.y), size = 1.2) +
+  geom_point(size = 1, shape = 21, fill = "white") + 
+  scale_color_npg()
+
+
+long_data %>% 
+  Common_Plot(
+    aes_x = timepoint, 
+    aes_y = VO2_peak, 
+    aes_group = ID, 
+    y_lab = "VO2 Peak Average") +
+  geom_line(size = 0.6, color = "#7F8487") +
+  geom_smooth(method = "loess", se = FALSE, aes(group = Training_Group.y), size = 1.2) +
+  scale_x_discrete(breaks = c("Baseline", "12 Weeks")) +
+  geom_point(size = 1, shape = 21, fill = "white") + 
+  scale_color_npg()
+```
+
+
+#### 1. Checking for missing data
+
+
+```{r, echo=TRUE, include=TRUE}
+print(miss_var_summary(METs_Data))
+```
+
+
+#### 2. Exploratory analysis. 
+
+
+```{r, echo=TRUE, include=TRUE}
+# mean physical activity difference
+t.test(VM3.x ~ Training_Group.y, data = Relative_Acceleration)
+
+t.test(VM3.x ~ Randomization, data = Relative_Acceleration)
+
+# outcome distribution
+par(mfrow = c(1, 3))
+hist(long_data$QLQ_summary_score)
+hist(long_data$Totaal_Score)
+hist(long_data$VO2_peak)
+
+# center distribution
+patient_data %>% 
+  Common_Plot(
+    aes_x = Center,
+    y_lab = "Frequency") +
+  geom_bar() +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+  theme(axis.line.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1))
+
+# boxplots
+# QLQ
+long_data %>%
+  ggplot(aes(x = timepoint, y = QLQ_summary_score, fill = timepoint)) +
+  geom_boxplot() +
+  theme_minimal() +  
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "QLQ Summary Score by Timepoint",  
+       x = "Timepoint", 
+       y = "QLQ Summary Score") + 
+  theme(text = element_text(size = 12),  
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.title = element_blank(),
+        axis.title.x = element_blank())
+
+# Fatigue
+long_data %>%
+  ggplot(aes(x = timepoint, y = Totaal_Score, fill = timepoint)) +
+  geom_boxplot() +
+  theme_minimal() +  
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "Fatigue Score by Timepoint",  
+       x = "Timepoint", 
+       y = "Fatigue Score") + 
+  theme(text = element_text(size = 12),  
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.title = element_blank(),
+        axis.title.x = element_blank())
+
+# VO2
+long_data %>%
+  ggplot(aes(x = timepoint, y = VO2_peak, fill = timepoint)) +
+  geom_boxplot() +
+  theme_minimal() +
+  scale_x_discrete(breaks = c("Baseline", "12 Weeks")) +
+  scale_fill_brewer(palette = "Pastel1") +
+  labs(title = "VO2 Peak by Timepoint", y = "VO2 Score") + 
+  theme(text = element_text(size = 12),  
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.title = element_blank(),
+        axis.title.x = element_blank())
+```
+
+
+#### 3. Modelling
+
+
+The question we are trying to answer here is if the mean change between control and intervention varies according to the training group to which individuals belong, controlling for the stratification factors and the randomization varies according over time. 
+
+
+```{r}
+# create subset for VO2 since the outcome is not longitudinal
+VO2_long_data <- long_data %>%
+  group_by(ID) %>%
+  select(-QLQ_summary_score, - Totaal_Score, - Basevalue_QLQ, -Basevalue_FA)
+
+VO2_long_data <- VO2_long_data %>%
+  group_by(ID) %>%
+  filter(timepoint == "12 Weeks")
+
+# relevel long and VO2 data
+long_data$Randomization <- relevel(long_data$Randomization, ref = "Control")
+VO2_long_data$Randomization <- relevel(VO2_long_data$Randomization, ref = "Control")
+```
+
+
+```{r, echo=TRUE, include=TRUE}
+# unadjusted
+# model quality of life
+unadjusted_QLQ <- lmer(QLQ_summary_score ~ Training_Group.y*Randomization + Randomization*timepoint + (1|ID), data = long_data)
+
+# model fatigue
+unadjusted_FA <- lmer(Totaal_Score ~ Training_Group.y*Randomization + Randomization*timepoint + (1|ID), data = long_data)
+
+# model cardiorespiratory fitness
+unadjusted_VO2 <- lm(VO2_peak ~ Training_Group.y*Randomization, data = VO2_long_data)
+
+# results
+summ(unadjusted_QLQ, confint = TRUE, digits = 3)
+summ(unadjusted_FA, confint = TRUE, digits = 3)
+summary(unadjusted_VO2, confint = TRUE)
+```
+
+
+```{r, echo=TRUE, include=TRUE}
+# adjusted
+# model quality of life
+model_QLQ <- lmer(QLQ_summary_score ~ Training_Group.y*Randomization + Time_since_surgery_dich + timepoint*Randomization + Center + Sex + Basevalue_QLQ + (1|ID), data = long_data, REML = TRUE)
+ 
+# model fatigue
+model_FA <- lmer(Totaal_Score ~ Training_Group.y*Randomization + Time_since_surgery_dich + timepoint*Randomization + Center + Sex + Basevalue_FA + (1|ID), data = long_data, REML = TRUE)
+
+# model cardiorespiratory fitness
+model_VO2 <- lm(VO2_peak ~ Training_Group.y*Randomization + Time_since_surgery_dich + Center + Sex + Basevalue_VO2, data = VO2_long_data)
+
+# function for results
+results_function <- function(model) {
+  summ_values <- summ(model, confint = TRUE, digits = 3)
+  emm_values <- emmeans(model, specs = pairwise ~ Randomization:Training_Group.y, con.int = TRUE, adjust = "dunnettx")
+
+  return(list(summ = summ_values, emmeans = emm_values))
+}
+
+# print results QLQ
+results_function(model = model_QLQ)
+
+# print results fatigue
+results_function(model = model_FA)
+
+# print results VO2
+summary(model_VO2);confint(model_VO2)
+```
+
+
+```{r}
+# # add predicted values to dataframe to visually inspect change
+# # quality of life
+# long_data$row_number <- 1:nrow((long_data))
+# 
+# model_data_QLQ_int <- model.frame(model_QLQ)
+# model_data_QLQ_int$row_number <- as.integer(row.names(model_data_QLQ_int))
+# model_data_QLQ_int$predicted_QLQ <- predict(model_QLQ, re.form = ~ 0)
+# 
+# long_data <- left_join(long_data, model_data_QLQ_int[c("row_number", "predicted_QLQ")], by = "row_number")
+# 
+# # fatigue
+# model_data_FA_int <- model.frame(model_FA)
+# model_data_FA_int$row_number <- as.integer(row.names(model_data_FA_int))
+# model_data_FA_int$predicted_FA <- predict(model_FA, re.form = ~ 0)
+# 
+# long_data <- left_join(long_data, model_data_FA_int[c("row_number", "predicted_FA")], by = "row_number")
+# 
+# # VO2
+# model_data_VO2_int$ID <- 101:(nrow(model_data_VO2_int) + 100)
+# model_data_VO2_int$ID <- as.factor(model_data_VO2_int$ID)
+# model_data_VO2_int$predicted_VO2 <- predict(model_VO2)
+# 
+# long_data <- left_join(long_data, model_data_VO2_int[c("ID", "predicted_VO2")], by = "ID")
+```
+
+
+Visualize the mean response among morning and afternoon patients in the control and intervention groups over time.
+
+
+```{r}
+# # quality of life
+# ggplot(long_data, aes(x = timepoint, y = QLQ_summary_score)) +
+#   geom_line(aes(group = ID), color = "#7F8487", size = 0.6, alpha = 0.6) +
+#   geom_point(aes(y = predicted_QLQ, col = Training_Group.y)) +
+#   geom_smooth(method = "loess", aes(y = predicted_QLQ, group = Training_Group.y), se = FALSE) +
+#   scale_x_discrete(breaks = c("12 Weeks", "24 Weeks")) +
+#   theme(axis.title.x = element_blank()) +
+#   scale_color_npg() +
+#   theme_bw()
+```
+
+
+Check Assumptions and Correlations
+
+
+```{r, echo=TRUE, include=TRUE}
+# check homoscedasticity and linearity
+assumptions <- function(x, include_acf = TRUE) {
+  plot(fitted(x), residuals(x));abline(h = 0, col = "darkblue")
+  qqnorm(resid(x));qqline(resid(x))
+  shapiro <- shapiro.test(resid(x))
+  hist(resid(x))
+  
+  if (include_acf) {
+    autocor <- acf(resid(x))
+  } else {
+    autocor <- NULL
+  }
+
+  return(list(shapiro = shapiro, autocor = autocor))
+}
+
+par(mfrow = c(1, 2))
+
+# assumptions quality of life
+assumptions(model_QLQ)
+
+# assumptions fatigue
+assumptions(model_FA)
+
+# assumptions cardiorespiratory fitness
+assumptions(model_VO2, include_acf = FALSE)
+```
+
+
+### Subgroup Analysis
+
+
+Create subgroups and create models. 
+
+
+```{r, echo=TRUE, include=TRUE}
+# make subgroups
+morning_long_data <- long_data[long_data$Training_Group.y == "Morning", ]
+afternoon_long_data <- long_data[long_data$Training_Group.y == "Afternoon", ]
+VO2_morning_long_data <- VO2_long_data[VO2_long_data$Training_Group.y == "Morning", ]
+VO2_afternoon_long_data <- VO2_long_data[VO2_long_data$Training_Group.y == "Afternoon", ]
+
+# adjust reference level
+morning_long_data$Randomization <- relevel(morning_long_data$Randomization, ref = "Control")
+afternoon_long_data$Randomization <- relevel(afternoon_long_data$Randomization, ref = "Control")
+VO2_morning_long_data$Randomization <- relevel(VO2_morning_long_data$Randomization, ref = "Control")
+VO2_afternoon_long_data$Randomization <- relevel(VO2_afternoon_long_data$Randomization, ref = "Control")
+
+# modelling for intervention
+# model quality of life
+morning_QLQ <- lmer(QLQ_summary_score ~ Time_since_surgery_dich + timepoint*Randomization + Center + Sex + Basevalue_QLQ + (1|ID), data = morning_long_data, REML = TRUE)
+ 
+# model fatigue
+morning_FA <- lmer(Totaal_Score ~ Time_since_surgery_dich + timepoint*Randomization + Center + Sex + Basevalue_FA + (1|ID), data = morning_long_data, REML = TRUE)
+
+# model fatigue
+morning_VO2 <- lm(VO2_peak ~ Time_since_surgery_dich + Randomization + Center + Sex + Basevalue_VO2, data = VO2_morning_long_data)
+
+# modelling for control
+# model quality of life
+afternoon_QLQ <- lmer(QLQ_summary_score ~ Time_since_surgery_dich + timepoint*Randomization + Center + Sex + Basevalue_QLQ + (1|ID), data = afternoon_long_data, REML = TRUE)
+ 
+# model fatigue
+afternoon_FA <- lmer(Totaal_Score ~ Time_since_surgery_dich + timepoint*Randomization + Center + Sex + Basevalue_FA + (1|ID), data = afternoon_long_data, REML = TRUE)
+
+# model fatigue
+afternoon_VO2 <- lm(VO2_peak ~ Time_since_surgery_dich + Randomization + Center + Sex + Basevalue_VO2, data = VO2_afternoon_long_data)
+```
+
+
+Results of mixed models and linear regression with estimated marginal means for between-group differences. 
+
+
+```{r}
+# new function for witihin-group differences summ and emm
+subgroup_results_within_function <- function(model) {
+  summ_values <- summ(model, confint = TRUE, digits = 3)
+  emm_values <- emmeans(model,  specs = pairwise ~ timepoint | Randomization, type = "response")
+
+  return(list(summ = summ_values, emmeans = emm_values))
+}
+
+# output morning
+subgroup_results_within_function(morning_QLQ)
+subgroup_results_within_function(morning_FA)
+summary(morning_VO2);confint(morning_VO2)
+
+# output afternoon
+subgroup_results_within_function(afternoon_QLQ)
+subgroup_results_within_function(afternoon_FA)
+summary(afternoon_VO2);confint(afternoon_VO2)
+```
+
+
+```{r}
+# new function for between-group differences emm
+subgroup_results_between_function <- function(model, timepoint = TRUE) {
+  if (timepoint == TRUE) { 
+    emm_values <- emmeans(model,  specs = pairwise ~ Randomization | timepoint, type = "response")
+    return(emm_values)
+  } else {
+    emm_values <- emmeans(model,  specs = pairwise ~ Randomization, type = "response")
+    return(emm_values)
+  }
+}
+
+# output morning
+subgroup_results_between_function(model = morning_QLQ)
+subgroup_results_between_function(model = morning_FA)
+subgroup_results_between_function(model = morning_VO2, timepoint = FALSE)
+
+# output afternoon
+subgroup_results_between_function(model = afternoon_QLQ)
+subgroup_results_between_function(model = afternoon_FA)
+subgroup_results_between_function(model = afternoon_VO2, timepoint = FALSE)
+```
+
+
+Model assumptions.
+
+
+```{r, echo=TRUE, include=TRUE}
+# assumptions morning group
+par(mfrow = c(2, 2))
+assumptions(morning_QLQ)
+assumptions(morning_FA)
+assumptions(morning_VO2)
+
+# assumptions afternoon group
+assumptions(afternoon_QLQ)
+assumptions(afternoon_FA)
+assumptions(afternoon_VO2)
+```
+
+
+### 4. Process Findings into Academic Insights
+
+
+Prepare data.
+
+
+```{r}
+# create column with open space for forest plot
+function_open_column <- function() {
+  paste(rep(" ", 35), collapse = " ")
+}
+
+# create estimate and ci column
+function_paste_ci <- function(est, low, up) {
+  ifelse(is.na(est) | is.na(low) | is.na(up), "", sprintf("%.2f (%.2f, %.2f)", est, low, up))
+}
+
+# change column names
+change_column_names <- function(df, new_names) {
+  if (length(new_names) != ncol(df)) {
+    stop("The number of new names must match the number of columns in the dataframe.")
+  }
+  
+  colnames(df) <- new_names
+  
+  return(df)
+}
+```
+
+
+```{r}
+# prepare forest data  
+Results_Table <- read_excel("//ds/DATA/JC/Datamanagement/Research/Cancer/PERFECT_Sam/G_Output/2_Data/Results Table.xlsx", sheet = "Blad2")
+
+Results_Table <- Results_Table %>% 
+  mutate_if(is.numeric, round, 2) %>%
+  mutate_all(~ ifelse(is.na(.), "", .)) %>%
+  mutate(`QoL summary score` = function_open_column(),
+         `Fatigue score` = function_open_column(),
+         `VO2 peak` = function_open_column()) %>% 
+  relocate(`QoL summary score`, .before = `P Randomization*Training Group`) %>% 
+  relocate(`Fatigue score`, .before = `P Randomization*Training Group5`) %>% 
+  relocate(`VO2 peak`, .before = `P Randomization*Training Group9`)
+
+columns_to_convert <- grep("^(Estimate|Lower|Upper|SE)", names(Results_Table), value = TRUE)
+Results_Table[columns_to_convert] <- lapply(Results_Table[columns_to_convert], function(x) as.numeric(as.character(x)))
+
+
+# looping through the rows to add whitespace
+columns <- c("Kolom2", "Kolom3", "Kolom1")
+
+for (row in c(2,5,6,9,12,13)) { 
+  for (col in columns) {
+    if (Results_Table[row, col] %in% c("Morning", "Afternoon", "All patients")) {
+      Results_Table[row, col] <- paste0("        ", Results_Table[row, col])
+    }
+  }
+}
+```
+
+Create forest plots. 
+
+
+```{r}
+# theme
+theme <- forest_theme(
+  base_family = "Times New Rman",  
+  base_size = 9, 
+  
+  core = list(bg_params = list(fill = c("#f5f5f5", "#D4E7C5", "#f5f5f5", "#f5f5f5", "#E1F0DA", "#E1F0DA", "#f5f5f5", "#f5f5f5", "#D4E7C5", "#f5f5f5", "#f5f5f5", "#E1F0DA", "#E1F0DA"))),
+  
+  # Confidence interval point shape, line type/color/width
+  ci_pch = 16, 
+  ci_col = "#4daf4a",  
+  ci_fill = "#377eb8", 
+  ci_alpha = 0.9,  
+  ci_lty = 1,  # Solid line for CI
+  ci_lwd = 2,  # Thicker line for CI for better visibility
+  ci_Theight = 0.3,  
+  
+  # Reference line width/type/color
+  refline_lwd = 1.5,  
+  refline_lty = "dotted",  
+  refline_col = "#e41a1c",
+  
+  # Vertical line width/type/color
+  vertline_lwd = 1.5,  
+  vertline_lty = "solid",  
+  vertline_col = "#999999",  
+  
+  # Footnote font size/face/color
+  footnote_cex = 0.7,  
+  footnote_fontface = "italic",  
+  footnote_col = "#ff7f00",  
+  
+  # Additional text elements
+  title_cex = 1.2,  
+  title_fontface = "bold", 
+  axis_title_cex = 1.0, 
+  axis_title_fontface = "bold", 
+  axis_text_cex = 0.9,  
+  axis_text_fontface = "plain"  
+)
+
+```
+
+
+```{r}
+# quality of life data
+forestdata_QLQ <- Results_Table[, 1:7] %>%
+  mutate(`Estimate (95% CI)` = function_paste_ci(Estimate, Lower, Upper))
+
+forestdata_QLQ <- change_column_names(forestdata_QLQ, c("", "Estimate", "Lower", "Upper", "SE", "QoL summary score", "P Interaction", "Estimate (95% CI)"))
+forestdata_QLQ <- forestdata_QLQ %>% relocate(`Estimate (95% CI)`, .before = `P Interaction`)
+
+# plot
+forestplot_QLQ <- forest(
+  forestdata_QLQ[, c(1, 6, 7, 8)],
+  est = forestdata_QLQ$Estimate,
+  low = forestdata_QLQ$Lower,
+  upper = forestdata_QLQ$Upper,
+  ci_column = 2,
+  xlim = c(-12, 12),
+  ref_lin = 0,
+  arrow_lab = c("Favours Control", "Favours Intervention"),
+  theme = theme,
+  title = "A."
+)
+
+# save 
+forestplot_QLQ 
+ggsave(filename = "forestQLQ.png", plot = forestplot_QLQ, width = 6.5, height = 4)
+```
+
+
+```{r}
+# fatigue
+# data
+forestdata_FA <- data.frame(
+  Results_Table[, 8:14],
+  `Estimate (95%)` = function_paste_ci(Results_Table$Estimate22, Results_Table$Lower3, Results_Table$Upper4)
+)
+
+forestdata_FA <- change_column_names(forestdata_FA, c("", "Estimate", "Lower", "Upper", "SE", "Fatigue score", "P Interaction", "Estimate (95% CI)"))
+forestdata_FA <- forestdata_FA %>% relocate(`Estimate (95% CI)`, .before = `P Interaction`)
+
+
+# plot 
+forestplot_FA <- forest(
+  forestdata_FA[, c(1, 6, 7, 8)],
+  est = forestdata_FA$Estimate,
+  low = forestdata_FA$Lower,
+  upper = forestdata_FA$Upper,
+  ci_column = 2,
+  xlim = c(-12, 12),
+  ref_lin = 0,
+  arrow_lab = c("Favours Intervention", "Favours Control"),
+  theme = theme,
+  title = "B."
+)
+
+forestplot_FA 
+ggsave(filename = "forestFA.png", plot = forestplot_FA, width = 6.5, height = 4)
+```
+
+
+```{r}
+# VO2
+# data
+forestdata_VO2_12 <- data.frame(
+  Results_Table[c(1:6), c(15:21)],
+  `Estimate (95% CI)` = function_paste_ci(
+    Results_Table$Estimate6[1:6], 
+    Results_Table$Lower7[1:6], 
+    Results_Table$Upper8[1:6]
+  )
+)
+
+forestdata_VO2_12 <- change_column_names(forestdata_VO2_12, c("", "Estimate", "Lower", "Upper", "SE", "VO2 peak", "P Interaction", "Estimate (95% CI)"))
+forestdata_VO2_12 <- forestdata_VO2_12 %>% relocate(`Estimate (95% CI)`, .before = `P Interaction`)
+
+# plot
+forestplot_VO2_12 <- forest(
+  forestdata_VO2_12[, c(1, 6, 7, 8)],
+  est = forestdata_VO2_12$Estimate,
+  low = forestdata_VO2_12$Lower,
+  upper = forestdata_VO2_12$Upper,
+  ci_column = 2,
+  xlim = c(0, 5),
+  ref_lin = 0,
+  arrow_lab = c("Favours Control", "Favours Intervention"),
+  theme = theme,
+  title = "C."
+)
+
+forestplot_VO2_12
+ggsave(filename = "forestVO2.png", plot = forestplot_VO2_12, width = 6.5, height = 4)
+```
+
+
+### K-means for Longitudinal Data (kml)
+
+  
+```{r, echo=TRUE, include=TRUE}
+set.seed(123)
+Scaled_Relative_Acceleration <- Relative_Acceleration %>% 
+  select(ID, Hour, VM3.x, RA) %>% 
+  mutate(Hour = as.numeric(Hour))
+
+# Aggregate only VM3.x by ID and Hour
+Scaled_Relative_Acceleration <- aggregate(cbind(VM3.x, RA) ~ ID + Hour, data = Scaled_Relative_Acceleration, FUN = mean)
+
+# Scale only VM3.x (not Hour)
+Scaled_Relative_Acceleration <- scale(Scaled_Relative_Acceleration[c("VM3.x", "RA")])
+
+# Perform hierarchical k-means clustering on the scaled VM3.x along with Hour
+hkmeans_results <- hkmeans(Scaled_Relative_Acceleration, k = 2)
+
+# Use fviz_cluster to visualize the clusters
+fviz_cluster(
+  hkmeans_results, 
+  data = Scaled_Relative_Acceleration,
+  palette = c("#2E9FDF", "#E7B800"), 
+  geom = "point",
+  ellipse.type = "convex", 
+  ggtheme = theme_bw()
+)
+
+Scaled_Relative_Acceleration <- as.data.frame(Scaled_Relative_Acceleration)
+Scaled_Relative_Acceleration$Clusters <- hkmeans_results$cluster
+```
