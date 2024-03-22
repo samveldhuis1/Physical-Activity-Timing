@@ -10,15 +10,7 @@ html_document:
   toc_floot: true
 ---
 
-### Libraries and Settings
-
-Set working directory.
-
-```{r, setup, include = FALSE}
-knitr::opts_knit$set(root.dir = "/dsD/ATA/JC/Datamanagement/Research/Cancer/PERFECT_Sam/E_ResearchData/2_ResearchData/iii. CSV Files Physical Activity Data/CSVFiles")
-knitr::opts_chunk$set(echo=TRUE, eval=FALSE)
-```
-
+### Libraries 
 
 ```{r}
 library(vctrs)
